@@ -2,7 +2,7 @@
 import React, { useState } from "react";
 import { ethers } from "ethers";
 import { Token } from "@uniswap/sdk-core";
-import { Pool, Position , nearestUsableTick} from "@uniswap/v3-sdk";
+import { Pool, Position, nearestUsableTick } from "@uniswap/v3-sdk";
 import JSBI from "jsbi";
 
 const provider = new ethers.providers.JsonRpcProvider("https://arb1.arbitrum.io/rpc");
@@ -18,12 +18,15 @@ const CAMELOT_FACTORY = "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B";
 // ABIs
 const UNI_PM_ABI = [
   "function positions(uint256) view returns (uint96 nonce,address operator,address token0,address token1,uint24 fee,int24 tickLower,int24 tickUpper,uint128 liquidity,uint256,uint256,uint128 tokensOwed0,uint128 tokensOwed1)",
-  "function collect(tuple(uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max)) external returns (uint256 amount0, uint256 amount1)"
+  "function collect((uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max) params) external returns (uint256 amount0, uint256 amount1)",
+  "function ownerOf(uint256) view returns (address)"
 ];
 
+// ✅ Camelot also uses struct-based collect
 const CAM_PM_ABI = [
   "function positions(uint256) view returns (uint96 nonce,address operator,address token0,address token1,int24 tickLower,int24 tickUpper,uint128 liquidity,uint256,uint256,uint128 tokensOwed0,uint128 tokensOwed1)",
-  "function collect(uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max) external returns (uint256 amount0,uint256 amount1)"
+  "function collect((uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max) params) external returns (uint256 amount0,uint256 amount1)",
+  "function ownerOf(uint256) view returns (address)"
 ];
 
 const UNI_FACTORY_ABI = [
@@ -81,41 +84,32 @@ async function getPoolState(poolAddress, dex) {
   }
 }
 
+function feeToTickSpacing(fee) {
+  switch (Number(fee)) {
+    case 500: return 10;
+    case 3000: return 60;
+    case 10000: return 200;
+    default: return 60;
+  }
+}
+
 /**
- * simulateCollect: perform a callStatic.collect to estimate uncollected fees.
- * Use pm (position manager) as recipient to avoid collect reverts from using address(0).
- *
- * returns: [BigNumber fee0, BigNumber fee1]
+ * simulateCollect (works for both Uniswap + Camelot, both struct-based)
  */
 async function simulateCollect(pm, nftId, dex) {
   try {
     const pmAbi = dex === "camelot" ? CAM_PM_ABI : UNI_PM_ABI;
     const contract = new ethers.Contract(pm, pmAbi, provider);
 
-    // use the PM address itself as recipient for simulation to avoid recipient validation failures
-    const recipient = pm;
+    const params = {
+      tokenId: ethers.BigNumber.from(nftId),
+      recipient: pm, // safe fallback
+      amount0Max: MAX_UINT128,
+      amount1Max: MAX_UINT128
+    };
 
-    if (dex === "uniswap") {
-      // Uniswap v3 positions.collect expects a struct
-      const result = await contract.callStatic.collect({
-        tokenId: nftId,
-        recipient,
-        amount0Max: MAX_UINT128,
-        amount1Max: MAX_UINT128
-      });
-      // result: { amount0, amount1 }
-      return [ethers.BigNumber.from(result.amount0), ethers.BigNumber.from(result.amount1)];
-    } else {
-      // Camelot style (positional args)
-      const result = await contract.callStatic.collect(
-        nftId,
-        recipient,
-        MAX_UINT128,
-        MAX_UINT128
-      );
-      // result: [amount0, amount1]
-      return [ethers.BigNumber.from(result[0]), ethers.BigNumber.from(result[1])];
-    }
+    const res = await contract.callStatic.collect(params);
+    return [ethers.BigNumber.from(res.amount0), ethers.BigNumber.from(res.amount1)];
   } catch (err) {
     console.warn("simulateCollect failed:", err?.message ?? err);
     return [ethers.BigNumber.from(0), ethers.BigNumber.from(0)];
@@ -133,46 +127,42 @@ function App() {
     setLoading(true);
     setResult(null);
     try {
-      if (!nftId && nftId !== 0) throw new Error("Please provide an NFT ID");
+      if (nftId === "") throw new Error("Please provide an NFT ID");
 
       const pm = dex === "camelot" ? CAMELOT_PM : UNISWAP_PM;
       const pmAbi = dex === "camelot" ? CAM_PM_ABI : UNI_PM_ABI;
       const contract = new ethers.Contract(pm, pmAbi, provider);
 
-      // fetch position struct
       const pos = await contract.positions(nftId);
 
-      // basic validation
       const token0Addr = pos.token0;
       const token1Addr = pos.token1;
       if (!token0Addr || !token1Addr || token0Addr === ethers.constants.AddressZero) {
         throw new Error("Invalid position (missing tokens)");
       }
 
-      // parse on-chain values (some ABIs include tokensOwed fields)
       const tickLower = Number(pos.tickLower);
       const tickUpper = Number(pos.tickUpper);
       const liquidity = pos.liquidity ? pos.liquidity.toString() : "0";
       const fee = pos.fee ? Number(pos.fee) : 3000;
 
-      // if tokensOwed fields exist on the returned struct, read them
-      const tokensOwed0 = pos.tokensOwed0 ? ethers.BigNumber.from(pos.tokensOwed0) : ethers.BigNumber.from(0);
-      const tokensOwed1 = pos.tokensOwed1 ? ethers.BigNumber.from(pos.tokensOwed1) : ethers.BigNumber.from(0);
+      const tokensOwed0BN = pos.tokensOwed0 ? ethers.BigNumber.from(pos.tokensOwed0) : ethers.BigNumber.from(0);
+      const tokensOwed1BN = pos.tokensOwed1 ? ethers.BigNumber.from(pos.tokensOwed1) : ethers.BigNumber.from(0);
 
-      // pool
       const poolAddr = await getPoolAddress(token0Addr, token1Addr, fee, dex);
       if (!poolAddr || poolAddr === ethers.constants.AddressZero) throw new Error("Pool not found");
-
       const state = await getPoolState(poolAddr, dex);
 
-      // token metadata
       const t0 = await fetchTokenMeta(token0Addr);
       const t1 = await fetchTokenMeta(token1Addr);
 
       const token0 = new Token(42161, token0Addr, t0.decimals, t0.symbol);
       const token1 = new Token(42161, token1Addr, t1.decimals, t1.symbol);
 
-      // construct pool + position (sdk expects sqrtPriceX96 as string or BigInt)
+      const tickSpacing = feeToTickSpacing(state.fee || fee);
+      const usableTickLower = nearestUsableTick(tickLower, tickSpacing);
+      const usableTickUpper = nearestUsableTick(tickUpper, tickSpacing);
+
       const pool = new Pool(
         token0,
         token1,
@@ -185,27 +175,23 @@ function App() {
       const position = new Position({
         pool,
         liquidity: JSBI.BigInt(liquidity),
-        tickLower: nearestUsableTick(tickLower, pool.tickSpacing),
-        tickUpper: nearestUsableTick(tickUpper, pool.tickSpacing)
+        tickLower: usableTickLower,
+        tickUpper: usableTickUpper
       });
 
-      // principal (withdrawable amounts from position - token amounts from removing liquidity)
-      const withdraw0Str = position.amount0.toSignificant(12); // string
-      const withdraw1Str = position.amount1.toSignificant(12);
+      const withdraw0 = parseFloat(position.amount0.toSignificant(12));
+      const withdraw1 = parseFloat(position.amount1.toSignificant(12));
 
-      const withdraw0 = parseFloat(withdraw0Str);
-      const withdraw1 = parseFloat(withdraw1Str);
-
-      // simulated uncollected fees via callStatic.collect
       const [fee0Raw, fee1Raw] = await simulateCollect(pm, nftId, dex);
       const fee0 = parseFloat(ethers.utils.formatUnits(fee0Raw, t0.decimals));
       const fee1 = parseFloat(ethers.utils.formatUnits(fee1Raw, t1.decimals));
 
-      // tokensOwed (on-chain stored uncollected fees) formatted
-      const owed0 = parseFloat(ethers.utils.formatUnits(tokensOwed0, t0.decimals));
-      const owed1 = parseFloat(ethers.utils.formatUnits(tokensOwed1, t1.decimals));
+      const owed0 = parseFloat(ethers.utils.formatUnits(tokensOwed0BN, t0.decimals));
+      const owed1 = parseFloat(ethers.utils.formatUnits(tokensOwed1BN, t1.decimals));
 
-      // totals: principal (withdrawable) + simulated uncollected fees
+      const currentTick = Number(state.tick);
+      const inRange = currentTick >= usableTickLower && currentTick <= usableTickUpper;
+
       const totalClaimable0 = withdraw0 + fee0;
       const totalClaimable1 = withdraw1 + fee1;
 
@@ -213,13 +199,17 @@ function App() {
         dex,
         pm,
         poolAddress: poolAddr,
-        token0: { symbol: t0.symbol, address: token0Addr, decimals: t0.decimals },
-        token1: { symbol: t1.symbol, address: token1Addr, decimals: t1.decimals },
+        token0: { symbol: t0.symbol, address: token0Addr },
+        token1: { symbol: t1.symbol, address: token1Addr },
         withdrawable: { amount0: withdraw0, amount1: withdraw1 },
         simulatedUncollected: { amount0: fee0, amount1: fee1 },
         onchainTokensOwed: { amount0: owed0, amount1: owed1 },
         totalClaimable: { amount0: totalClaimable0, amount1: totalClaimable1 },
-        liquidity
+        liquidity,
+        poolTick: currentTick,
+        usableTickLower,
+        usableTickUpper,
+        inRange
       });
     } catch (err) {
       console.error(err);
@@ -255,47 +245,45 @@ function App() {
         </button>
       </div>
 
-      <div>
-        {result && result.error && (
-          <div style={{ color: "crimson" }}>
-            <b>Error:</b> {result.error}
+      {result && result.error && (
+        <div style={{ color: "crimson" }}>
+          <b>Error:</b> {result.error}
+        </div>
+      )}
+
+      {result && !result.error && (
+        <div style={{ whiteSpace: "pre-wrap" }}>
+          <h3>Position Summary</h3>
+          <div><b>DEX:</b> {result.dex}</div>
+          <div><b>Position Manager:</b> {result.pm}</div>
+          <div><b>Pool:</b> {result.poolAddress}</div>
+          <hr />
+
+          <div>
+            <b>{result.token0.symbol}</b> — {result.token0.address}
+            <div>Withdrawable: {result.withdrawable.amount0} {result.token0.symbol}</div>
+            <div>Simulated uncollected fees: {result.simulatedUncollected.amount0} {result.token0.symbol}</div>
+            <div>On-chain tokensOwed: {result.onchainTokensOwed.amount0} {result.token0.symbol}</div>
+            <div><b>Total claimable: {result.totalClaimable.amount0} {result.token0.symbol}</b></div>
           </div>
-        )}
 
-        {result && !result.error && (
-          <div style={{ whiteSpace: "pre-wrap" }}>
-            <h3>Position Summary</h3>
-            <div><b>DEX:</b> {result.dex}</div>
-            <div><b>Position Manager:</b> {result.pm}</div>
-            <div><b>Pool:</b> {result.poolAddress}</div>
-            <hr />
-
-            <div style={{ marginTop: 8 }}>
-              <b>{result.token0.symbol}</b> — {result.token0.address}
-              <div>Withdrawable (principal): {Number(result.withdrawable.amount0).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token0.symbol}</div>
-              <div>Simulated uncollected fees: {Number(result.simulatedUncollected.amount0).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token0.symbol}</div>
-              <div>On-chain tokensOwed: {Number(result.onchainTokensOwed.amount0).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token0.symbol}</div>
-              <div><b>Total claimable (principal + simulated fees): {Number(result.totalClaimable.amount0).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token0.symbol}</b></div>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              <b>{result.token1.symbol}</b> — {result.token1.address}
-              <div>Withdrawable (principal): {Number(result.withdrawable.amount1).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token1.symbol}</div>
-              <div>Simulated uncollected fees: {Number(result.simulatedUncollected.amount1).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token1.symbol}</div>
-              <div>On-chain tokensOwed: {Number(result.onchainTokensOwed.amount1).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token1.symbol}</div>
-              <div><b>Total claimable (principal + simulated fees): {Number(result.totalClaimable.amount1).toLocaleString(undefined, { maximumFractionDigits: 12 })} {result.token1.symbol}</b></div>
-            </div>
-
-            <hr />
-            <div><b>Liquidity (raw):</b> {result.liquidity}</div>
-
-            <details style={{ marginTop: 12 }}>
-              <summary>Raw result (debug)</summary>
-              <pre>{JSON.stringify(result, null, 2)}</pre>
-            </details>
+          <div style={{ marginTop: 12 }}>
+            <b>{result.token1.symbol}</b> — {result.token1.address}
+            <div>Withdrawable: {result.withdrawable.amount1} {result.token1.symbol}</div>
+            <div>Simulated uncollected fees: {result.simulatedUncollected.amount1} {result.token1.symbol}</div>
+            <div>On-chain tokensOwed: {result.onchainTokensOwed.amount1} {result.token1.symbol}</div>
+            <div><b>Total claimable: {result.totalClaimable.amount1} {result.token1.symbol}</b></div>
           </div>
-        )}
-      </div>
+
+          <hr />
+          <div><b>Liquidity:</b> {result.liquidity}</div>
+          <div><b>Pool tick:</b> {result.poolTick}</div>
+          <div><b>Usable ticks:</b> {result.usableTickLower} — {result.usableTickUpper}</div>
+          <div style={{ color: result.inRange ? "green" : "orange" }}>
+            <b>Position in-range:</b> {String(result.inRange)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

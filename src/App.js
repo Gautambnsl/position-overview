@@ -1,5 +1,6 @@
 // src/App.js
 import React, { useState } from "react";
+import "./App.css";
 import { ethers } from "ethers";
 import { Token } from "@uniswap/sdk-core";
 import { Pool, Position, nearestUsableTick } from "@uniswap/v3-sdk";
@@ -123,6 +124,25 @@ function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // Formatting helpers for better readability
+  const fmt = (n) => {
+    if (n === null || n === undefined) return "-";
+    if (typeof n !== "number") return String(n);
+    if (!isFinite(n)) return String(n);
+    if (Math.abs(n) >= 1e9) return n.toExponential(4);
+    return n.toLocaleString(undefined, { maximumSignificantDigits: 10 });
+  };
+  const fmtBigIntString = (s) => {
+    if (!s) return "-";
+    // Add thousand separators without converting to Number (preserve big ints)
+    return String(s).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  };
+  const shortAddr = (a) => {
+    if (!a) return "-";
+    const s = String(a);
+    return s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
+  };
+
   const fetchPosition = async () => {
     setLoading(true);
     setResult(null);
@@ -134,6 +154,7 @@ function App() {
       const contract = new ethers.Contract(pm, pmAbi, provider);
 
       const pos = await contract.positions(nftId);
+      const owner = await contract.ownerOf(nftId);
 
       const token0Addr = pos.token0;
       const token1Addr = pos.token1;
@@ -198,6 +219,7 @@ function App() {
       setResult({
         dex,
         pm,
+        owner,
         poolAddress: poolAddr,
         token0: { symbol: t0.symbol, address: token0Addr },
         token1: { symbol: t1.symbol, address: token1Addr },
@@ -220,70 +242,88 @@ function App() {
   };
 
   return (
-    <div style={{ padding: 20, fontFamily: "monospace" }}>
-      <h2>DEX Position Viewer (Arbitrum)</h2>
+    <div className="app">
+      <div className="card">
+        <h2 className="title">DEX Position Viewer <span className="subtitle">(Arbitrum)</span></h2>
 
-      <div style={{ marginBottom: 12 }}>
-        <label>
-          DEX:{" "}
-          <select value={dex} onChange={(e) => setDex(e.target.value)}>
-            <option value="camelot">Camelot V3</option>
-            <option value="uniswap">Uniswap V3</option>
-          </select>
-        </label>
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <input
-          placeholder="NFT ID"
-          value={nftId}
-          onChange={(e) => setNftId(e.target.value)}
-          style={{ padding: 8, width: 200 }}
-        />
-        <button onClick={fetchPosition} style={{ marginLeft: 8, padding: "8px 12px" }}>
-          {loading ? "Fetching..." : "Fetch Position"}
-        </button>
-      </div>
-
-      {result && result.error && (
-        <div style={{ color: "crimson" }}>
-          <b>Error:</b> {result.error}
-        </div>
-      )}
-
-      {result && !result.error && (
-        <div style={{ whiteSpace: "pre-wrap" }}>
-          <h3>Position Summary</h3>
-          <div><b>DEX:</b> {result.dex}</div>
-          <div><b>Position Manager:</b> {result.pm}</div>
-          <div><b>Pool:</b> {result.poolAddress}</div>
-          <hr />
-
-          <div>
-            <b>{result.token0.symbol}</b> — {result.token0.address}
-            <div>Withdrawable: {result.withdrawable.amount0} {result.token0.symbol}</div>
-            <div>Simulated uncollected fees: {result.simulatedUncollected.amount0} {result.token0.symbol}</div>
-            <div>On-chain tokensOwed: {result.onchainTokensOwed.amount0} {result.token0.symbol}</div>
-            <div><b>Total claimable: {result.totalClaimable.amount0} {result.token0.symbol}</b></div>
+        <div className="controls">
+          <div className="field">
+            <label className="label">DEX</label>
+            <select className="select" value={dex} onChange={(e) => setDex(e.target.value)}>
+              <option value="camelot">Camelot V3</option>
+              <option value="uniswap">Uniswap V3</option>
+            </select>
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            <b>{result.token1.symbol}</b> — {result.token1.address}
-            <div>Withdrawable: {result.withdrawable.amount1} {result.token1.symbol}</div>
-            <div>Simulated uncollected fees: {result.simulatedUncollected.amount1} {result.token1.symbol}</div>
-            <div>On-chain tokensOwed: {result.onchainTokensOwed.amount1} {result.token1.symbol}</div>
-            <div><b>Total claimable: {result.totalClaimable.amount1} {result.token1.symbol}</b></div>
-          </div>
-
-          <hr />
-          <div><b>Liquidity:</b> {result.liquidity}</div>
-          <div><b>Pool tick:</b> {result.poolTick}</div>
-          <div><b>Usable ticks:</b> {result.usableTickLower} — {result.usableTickUpper}</div>
-          <div style={{ color: result.inRange ? "green" : "orange" }}>
-            <b>Position in-range:</b> {String(result.inRange)}
+          <div className="field grow">
+            <label className="label">NFT ID</label>
+            <div className="inline">
+              <input
+                className="input"
+                placeholder="e.g. 12345"
+                value={nftId}
+                onChange={(e) => setNftId(e.target.value)}
+              />
+              <button className="button" onClick={fetchPosition}>
+                {loading ? "Fetching..." : "Fetch Position"}
+              </button>
+            </div>
           </div>
         </div>
-      )}
+
+        {result && result.error && (
+          <div className="alert error">
+            <b>Error:</b> {result.error}
+          </div>
+        )}
+
+        {result && !result.error && (
+          <div className="result">
+            <h3 className="section-title">Position Summary</h3>
+            <div className="kv">
+              <div className="row"><span className="key">DEX</span><span className="value badge">{result.dex}</span></div>
+              <div className="row"><span className="key">Position Manager</span><span className="value code truncate" title={result.pm}>{result.pm}</span></div>
+              <div className="row"><span className="key">Owner</span><span className="value code truncate" title={result.owner}>{result.owner}</span></div>
+              <div className="row"><span className="key">Pool</span><span className="value code truncate" title={result.poolAddress}>{result.poolAddress}</span></div>
+            </div>
+
+            <div className="tokens">
+              <div className="token">
+                <div className="token-header">
+                  <span className="token-symbol">{result.token0.symbol}</span>
+                  <span className="token-address code truncate" title={result.token0.address}>{result.token0.address}</span>
+                </div>
+                <div className="token-grid">
+                  <div className="item"><span className="muted">Withdrawable</span><span className="mono">{fmt(result.withdrawable.amount0)} {result.token0.symbol}</span></div>
+                  <div className="item break"><span className="muted">Simulated fees</span><span className="mono">{fmt(result.simulatedUncollected.amount0)} {result.token0.symbol}</span></div>
+                  <div className="item highlight"><span>Total claimable</span><span className="strong mono">{fmt(result.totalClaimable.amount0)} {result.token0.symbol}</span></div>
+                </div>
+              </div>
+
+              <div className="token">
+                <div className="token-header">
+                  <span className="token-symbol">{result.token1.symbol}</span>
+                  <span className="token-address code truncate" title={result.token1.address}>{result.token1.address}</span>
+                </div>
+                <div className="token-grid">
+                  <div className="item"><span className="muted">Withdrawable</span><span className="mono">{fmt(result.withdrawable.amount1)} {result.token1.symbol}</span></div>
+                  <div className="item break"><span className="muted">Simulated fees</span><span className="mono">{fmt(result.simulatedUncollected.amount1)} {result.token1.symbol}</span></div>
+                  <div className="item highlight"><span>Total claimable</span><span className="strong mono">{fmt(result.totalClaimable.amount1)} {result.token1.symbol}</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div className="metrics">
+              <div className="metric"><span className="key">Liquidity</span><span className="value code" title={result.liquidity}>{fmtBigIntString(result.liquidity)}</span></div>
+              <div className="metric"><span className="key">Pool tick</span><span className="value">{result.poolTick}</span></div>
+              <div className="metric"><span className="key">Usable ticks</span><span className="value">{result.usableTickLower} — {result.usableTickUpper}</span></div>
+              <div className={`metric ${result.inRange ? "ok" : "warn"}`}>
+                <span className="key">Position in-range</span><span className="value">{String(result.inRange)}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

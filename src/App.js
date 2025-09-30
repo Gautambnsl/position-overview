@@ -282,8 +282,13 @@ function App() {
             <h3 className="section-title">Position Summary</h3>
             <div className="kv">
               <div className="row"><span className="key">DEX</span><span className="value badge">{result.dex}</span></div>
+              <div className="row owner-row">
+                <span className="key">Owner</span>
+                <span className="value code truncate" title={result.owner}>
+                  {result.owner}
+                </span>
+              </div>
               <div className="row"><span className="key">Position Manager</span><span className="value code truncate" title={result.pm}>{result.pm}</span></div>
-              <div className="row"><span className="key">Owner</span><span className="value code truncate" title={result.owner}>{result.owner}</span></div>
               <div className="row"><span className="key">Pool</span><span className="value code truncate" title={result.poolAddress}>{result.poolAddress}</span></div>
             </div>
 

@@ -168,6 +168,13 @@ body {
 }
 
 .kv { display: grid; gap: 8px; margin-bottom: 16px; }
+.kv .owner-row {
+  background: rgba(79,140,255,0.03);
+  border: 1px solid rgba(79,140,255,0.15);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 12px -12px 16px -12px;
+}
 .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 .key { color: var(--muted); }
 .value { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; min-width: 0; max-width: 70%; text-align: right; }
